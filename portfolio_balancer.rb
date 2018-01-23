@@ -99,13 +99,15 @@ rate_moving_averages = KEYS.map do |key|
   [key, ma]
 end.to_h
 
+ideal_values = INITIAL_RATES_SEK.dup
+
 loop do
   puts "\n\nstart of day #{n += 1} balance: #{display_hash(amounts)}"
 
   # STEP 1: market movements to rates
   KEYS.each do |key|
     # 1.1: find ideal value according to long term trend
-    ideal_value = INITIAL_RATES_SEK[key] * (daily_growth[key]**n)
+    ideal_value = (ideal_values[key] *= daily_growth[key])
 
     # 1.2: calculate new rate t1 based on gaussian with mean=t0 and std dev by key
     t0 = rates[key]
