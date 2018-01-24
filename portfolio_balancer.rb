@@ -42,15 +42,15 @@ end
 # daily std dev of rate relative to 90 days rolling mean price
 RATES_STD_DEV = {
   sek: 0.to_d,
-  usd: 0.02.to_d,
-  btc: 0.10.to_d,
-  goog: 0.04.to_d
+  usd: 0.005.to_d,
+  btc: 0.07.to_d,
+  goog: 0.01.to_d
 }.freeze
 
 GROWTH_YOY = {
   sek: 1.to_d,
   usd: 1.to_d,
-  btc: 2.5.to_d,
+  btc: 3.2.to_d, # https://www.reddit.com/r/Bitcoin/comments/76bctp/bitcoin_price_history_growing_by_a_factor_of_32/
   goog: 1.05.to_d
 }.freeze
 
@@ -83,6 +83,46 @@ def display_decimal(value)
   end
 end
 
+# State machine that triggers shock at random time
+class ShockGenerator
+  def initialize(interval_mean:, interval_std_dev:)
+    @rng = Distribution::Normal.rng(interval_mean, interval_std_dev)
+    @days_until_next = @rng.call
+    @state = :normal
+  end
+
+  # advance state by one day
+  def advance
+    if @days_until_next <= 0
+      @state = :shock
+      @days_until_next = @rng.call
+    else
+      @state = :normal
+      @days_until_next -= 1
+    end
+  end
+
+  def shock?
+    @state == :shock
+  end
+end
+
+class NoShockGenerator
+  def advance; end
+
+  def shock?
+    false
+  end
+end
+
+# key -> (mean, std_dev)
+SHOCK_INTERVALS_DAYS = {
+  sek: [0, 0],
+  usd: [250, 60],
+  goog: [100, 20],
+  btc: [180, 60]
+}.freeze
+
 n = 0
 amounts = INITIAL_AMOUNTS.dup
 rates = INITIAL_RATES_SEK.dup
@@ -93,6 +133,10 @@ rngs = RATES_STD_DEV.map do |k, v|
   [k, Distribution::Normal.rng(0, v)]
 end.to_h
 
+shock_rngs = RATES_STD_DEV.map do |k, v|
+  [k, Distribution::Normal.rng(0, 10 * v)]
+end.to_h
+
 rate_moving_averages = KEYS.map do |key|
   ma = MovingAverage.new(90)
   ma.append(INITIAL_RATES_SEK[key])
@@ -100,6 +144,10 @@ rate_moving_averages = KEYS.map do |key|
 end.to_h
 
 ideal_values = INITIAL_RATES_SEK.dup
+shock_generators = SHOCK_INTERVALS_DAYS.map do |key, (mean, std_dev)|
+  next [key, NoShockGenerator.new] if mean == 0 && std_dev == 0
+  [key, ShockGenerator.new(interval_mean: mean, interval_std_dev: std_dev)]
+end.to_h
 
 loop do
   puts "\n\nstart of day #{n += 1} balance: #{display_hash(amounts)}"
@@ -110,8 +158,19 @@ loop do
     ideal_value = (ideal_values[key] *= daily_growth[key])
 
     # 1.2: calculate new rate t1 based on gaussian with mean=t0 and std dev by key
+    sg = shock_generators[key]
+    sg.advance
+
     t0 = rates[key]
-    s = rngs[key].call
+
+    # 10x std dev when a shock happens
+    s = if sg.shock?
+          puts "SHOCK to rate of #{key}!!!"
+          shock_rngs[key].call
+        else
+          rngs[key].call
+        end
+
     m = rate_moving_averages[key].current_value
     # puts "Key: #{key} | Rel std dev: #{s} | Mean 90: #{display_decimal(m)}"
     t1 = t0 + m * s
